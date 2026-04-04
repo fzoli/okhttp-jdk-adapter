@@ -2,15 +2,12 @@ package com.farcsal.okhttp.jdk
 
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.internal.closeQuietly
 import okio.buffer
 import okio.source
 import java.io.IOException
 import java.io.InputStream
-import java.net.ConnectException
-import java.net.InetAddress
-import java.net.SocketException
-import java.net.SocketTimeoutException
-import java.net.URI
+import java.net.*
 import java.net.http.*
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
@@ -38,8 +35,20 @@ class JdkInterceptor private constructor(
     private val httpClient: HttpClient,
 ) : Interceptor {
 
-    private val activeCalls = ConcurrentHashMap<Call, Thread>()
+    private val activeCalls = ConcurrentHashMap<Call, Pair<Thread, Response?>>()
     private val scheduler = ScheduledThreadPoolExecutor(1)
+
+    private fun Pair<Thread, Response?>.interrupt() {
+        this.second?.closeQuietly()
+        this.first.interrupt()
+    }
+
+    private val eventListener: EventListener = object : EventListener() {
+        override fun canceled(call: Call) {
+            val t = activeCalls.get(call)
+            t?.interrupt()
+        }
+    }
 
     init {
         // OkHttp doesn't expose a cancellation callback on the chain, so we poll.
@@ -65,6 +74,19 @@ class JdkInterceptor private constructor(
         )
     }
 
+    /**
+     * Switches from scheduler-based cancellation polling to event listener mode, where the
+     * underlying JDK request is cancelled immediately when OkHttp signals cancellation,
+     * instead of being detected on the next poll interval.
+     *
+     * Shuts down the internal scheduler and returns the [EventListener] to be registered
+     * on the [okhttp3.OkHttpClient.Builder].
+     */
+    fun useEventListener(): EventListener {
+        scheduler.shutdown()
+        return eventListener
+    }
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val call = chain.call()
         if (call.isCanceled()) {
@@ -79,40 +101,50 @@ class JdkInterceptor private constructor(
             return chain.proceed(originalRequest)
         }
 
+        val thread = Thread.currentThread()
         val jdkRequest = originalRequest.toJdkRequest(chain.readTimeoutMillis())
-        activeCalls[call] = Thread.currentThread()
+        activeCalls[call] = Pair(thread, null)
         val jdkResponse = try {
             httpClient.send(jdkRequest, HttpResponse.BodyHandlers.ofInputStream())
         } catch (e: InterruptedException) {
+            activeCalls.remove(call)
             Thread.currentThread().interrupt()
             if (call.isCanceled()) {
                 throw IOException("Canceled", e)
             }
             throw e
         } catch (e: HttpConnectTimeoutException) {
+            activeCalls.remove(call)
             throw SocketTimeoutException("Connect timed out")
                 .also { it.initCause(e) }
         } catch (e: HttpTimeoutException) {
+            activeCalls.remove(call)
             throw SocketTimeoutException("timeout")
                 .also { it.initCause(e) }
         } catch (e: ConnectException) {
+            activeCalls.remove(call)
             val host = originalRequest.url.host
             val port = originalRequest.url.port
             val ip = "/" + InetAddress.getByName(host).hostAddress
             throw ConnectException("Failed to connect to $host$ip:$port")
                 .also { it.initCause(e) }
         } catch (e: IOException) {
+            activeCalls.remove(call)
             if (e.message?.equals("Connection reset") == true) {
                 throw SocketException(e.message, e)
             }
             throw e
-        } finally {
+        } catch (t: Throwable) {
             activeCalls.remove(call)
+            throw t
         }
-        return buildResponse(jdkResponse, originalRequest)
+        val response = buildResponse(call, jdkResponse, originalRequest)
+        activeCalls[call] = Pair(thread, response)
+        return response
     }
 
     private fun buildResponse(
+        call: Call,
         httpResponse: HttpResponse<InputStream>,
         original: Request,
     ): Response {
@@ -124,12 +156,16 @@ class JdkInterceptor private constructor(
             override fun contentType(): MediaType? = mediaType
             override fun contentLength(): Long = contentLength
             override fun source(): okio.BufferedSource = source
+            override fun close() {
+                activeCalls.remove(call)
+                super.close()
+            }
         }
 
-        val protocol = when (httpResponse.version().name) {
-            "HTTP_3" -> Protocol.HTTP_3
-            "HTTP_2" -> Protocol.HTTP_2
-            "HTTP_1_1" -> Protocol.HTTP_1_1
+        val protocol = when (httpResponse.version()) {
+            HttpClient.Version.HTTP_3 -> Protocol.HTTP_3
+            HttpClient.Version.HTTP_2 -> Protocol.HTTP_2
+            HttpClient.Version.HTTP_1_1 -> Protocol.HTTP_1_1
             else -> throw IllegalStateException("Unknown protocol: ${httpResponse.version()}")
         }
 

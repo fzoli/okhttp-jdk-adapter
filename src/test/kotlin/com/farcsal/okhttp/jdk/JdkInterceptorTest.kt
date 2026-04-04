@@ -33,8 +33,8 @@ class JdkInterceptorTest {
         .version(HttpClient.Version.HTTP_3)
         .build()
 
-    private val okHttpClient: OkHttpClient = httpClient.okHttpClientBuilder()
-        .addInterceptor(JdkInterceptor.of(httpClient))
+    private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
+        .setup(httpClient)
         .build()
 
     private val wireMock: WireMockServer = WireMockServer(wireMockConfig().dynamicPort())
@@ -240,6 +240,36 @@ class JdkInterceptorTest {
     }
 
     @Test
+    fun `cancel after execute but before read throws Exception`() {
+        wireMock.stubFor(
+            get(urlEqualTo("/api/empty"))
+                .willReturn(aResponse().withStatus(200))
+        )
+        val request = Request.Builder()
+            .url("http://localhost:${wireMock.port()}/api/empty")
+            .build()
+        val call = okHttpClient.newCall(request)
+        var caught: Exception? = null
+        val latch = CountDownLatch(1)
+        Thread.startVirtualThread {
+            val response = call.execute()
+            call.cancel()
+            Thread.startVirtualThread {
+                try {
+                    response.body.string()
+                } catch (e: Exception) {
+                    caught = e
+                } finally {
+                    response.close()
+                    latch.countDown()
+                }
+            }
+        }
+        latch.await(5, TimeUnit.SECONDS)
+        assertInstanceOf(Exception::class.java, caught)
+    }
+
+    @Test
     fun `thread interrupt during request throws SocketException`() {
         wireMock.stubFor(
             get(urlEqualTo("/api/slow"))
@@ -313,8 +343,8 @@ class JdkInterceptorTest {
             .version(HttpClient.Version.HTTP_3)
             .connectTimeout(Duration.ofMillis(1))
             .build()
-        val okHttpClient = httpClient.okHttpClientBuilder()
-            .addInterceptor(JdkInterceptor.of(httpClient))
+        val okHttpClient = OkHttpClient.Builder()
+            .setup(httpClient)
             .build()
         // Use a non-routable address, so the connection attempt hangs
         // and triggers a timeout instead of failing immediately.
@@ -340,9 +370,9 @@ class JdkInterceptorTest {
         val httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_3)
             .build()
-        val okHttpClient = httpClient.okHttpClientBuilder()
+        val okHttpClient = OkHttpClient.Builder()
+            .setup(httpClient)
             .readTimeout(Duration.ofMillis(200))
-            .addInterceptor(JdkInterceptor.of(httpClient))
             .build()
         wireMock.stubFor(
             get(urlEqualTo("/api/timeout"))
@@ -671,8 +701,8 @@ class JdkInterceptorTest {
             .version(HttpClient.Version.HTTP_3)
             .followRedirects(HttpClient.Redirect.NEVER)
             .build()
-        val client = httpClient.okHttpClientBuilder()
-            .addInterceptor(JdkInterceptor.of(httpClient))
+        val client = OkHttpClient.Builder()
+            .setup(httpClient)
             .build()
         try {
             val request = Request.Builder()
@@ -703,8 +733,8 @@ class JdkInterceptorTest {
             .version(HttpClient.Version.HTTP_3)
             .followRedirects(HttpClient.Redirect.ALWAYS)
             .build()
-        val client = httpClient.okHttpClientBuilder()
-            .addInterceptor(JdkInterceptor.of(httpClient))
+        val client = OkHttpClient.Builder()
+            .setup(httpClient)
             .build()
         try {
             val request = Request.Builder()
@@ -731,8 +761,8 @@ class JdkInterceptorTest {
             .version(HttpClient.Version.HTTP_3)
             .followRedirects(HttpClient.Redirect.NEVER)
             .build()
-        val client = httpClient.okHttpClientBuilder()
-            .addInterceptor(JdkInterceptor.of(httpClient))
+        val client = OkHttpClient.Builder()
+            .setup(httpClient)
             .build()
         try {
             val request = Request.Builder()
@@ -843,14 +873,14 @@ class JdkInterceptorTest {
                 .willReturn(aResponse().withStatus(200).withBody("ok"))
         )
         val interceptedHeaders = mutableListOf<String>()
-        val client = httpClient.okHttpClientBuilder()
+        val client = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 interceptedHeaders += chain.request().header("X-Added") ?: ""
                 chain.proceed(
                     chain.request().newBuilder().header("X-Added", "yes").build()
                 )
             }
-            .addInterceptor(JdkInterceptor.of(httpClient))
+            .setup(httpClient)
             .build()
         try {
             val request = Request.Builder()
@@ -998,8 +1028,8 @@ class JdkInterceptorTest {
         val http11Client = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .build()
-        val client = http11Client.okHttpClientBuilder()
-            .addInterceptor(JdkInterceptor.of(http11Client))
+        val client = OkHttpClient.Builder()
+            .setup(http11Client)
             .build()
         val request = Request.Builder()
             .url("http://localhost:${wireMock.port()}/api/hello")
@@ -1033,9 +1063,9 @@ class JdkInterceptorTest {
         val httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_3)
             .build()
-        val client = httpClient.okHttpClientBuilder()
+        val client = OkHttpClient.Builder()
+            .setup(httpClient)
             .callTimeout(Duration.ofMillis(500))
-            .addInterceptor(JdkInterceptor.of(httpClient))
             .build()
         val request = Request.Builder()
             .url("http://localhost:${wireMock.port()}/api/slow")
