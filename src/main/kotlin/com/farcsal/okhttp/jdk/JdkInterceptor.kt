@@ -18,17 +18,29 @@ import java.util.concurrent.TimeUnit.MILLISECONDS
  * OkHttp [Interceptor] that routes HTTP traffic through the JDK's built-in [HttpClient]
  * instead of OkHttp's network stack.
  *
- * Add it as the last application interceptor so all other interceptors run before
- * the request hits the wire and after a response is returned:
+ * Usage:
  * ```
- * OkHttpClient.Builder()
- *     .addInterceptor(JdkInterceptor.of(HttpClient.newBuilder().build()))
- *     .build()
+ *     import com.farcsal.okhttp.jdk.setup
+ *     import okhttp3.OkHttpClient
+ *     import java.net.http.HttpClient
+ *
+ *     private val httpClient = HttpClient.newBuilder()
+ *         .version(HttpClient.Version.HTTP_3)
+ *         .build()
+ *
+ *     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
+ *         .setup(httpClient)
+ *         .build()
  * ```
+ *
+ * If you are not using the [com.farcsal.okhttp.jdk.setup] extension function, register this
+ * interceptor manually as the **last** application interceptor (so all other interceptors run
+ * before the request hits the wire) and also call [useEventListener] to obtain the
+ * [okhttp3.EventListener] and pass it to [okhttp3.OkHttpClient.Builder.eventListener].
  *
  * Caveats:
  * - OkHttp's network interceptors and its internal caching are bypassed.
- * - Cancellation is propagated via polling (every 500 ms), not via a callback.
+ * - Cancellation is propagated via polling (every 500 ms) unless [useEventListener] is used.
  * - Request bodies are fully buffered into the heap before sending; not suitable for large uploads.
  */
 class JdkInterceptor private constructor(
