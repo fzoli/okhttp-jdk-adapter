@@ -138,9 +138,14 @@ class JdkInterceptor private constructor(
             activeCalls.remove(call)
             throw t
         }
-        val response = buildResponse(call, jdkResponse, originalRequest)
-        activeCalls[call] = Pair(thread, response)
-        return response
+        try {
+            val response = buildResponse(call, jdkResponse, originalRequest)
+            activeCalls[call] = Pair(thread, response)
+            return response
+        } catch (t: Throwable) {
+            activeCalls.remove(call)
+            throw t
+        }
     }
 
     private fun buildResponse(
