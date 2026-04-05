@@ -14,6 +14,7 @@ import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 import java.io.IOException
 import java.net.ConnectException
+import java.net.CookieManager
 import java.net.ServerSocket
 import java.net.SocketException
 import java.net.SocketTimeoutException
@@ -1052,6 +1053,56 @@ class JdkInterceptorTest {
         assertFalse(call.isExecuted())
         call.execute().close()
         assertTrue(call.isExecuted())
+    }
+
+    @Test
+    fun `cookie set by server is sent on subsequent request`() {
+        wireMock.stubFor(
+            get(urlEqualTo("/api/login"))
+                .willReturn(
+                    aResponse()
+                        .withStatus(200)
+                        .withHeader("Set-Cookie", "session=abc123; Path=/")
+                )
+        )
+        wireMock.stubFor(
+            get(urlEqualTo("/api/protected"))
+                .willReturn(aResponse().withStatus(200).withBody("secret"))
+        )
+
+        val cookieManager = CookieManager()
+        val httpClient = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_3)
+            .cookieHandler(cookieManager)
+            .build()
+        val client = OkHttpClient.Builder()
+            .loadConfiguration(httpClient)
+            .build()
+
+        try {
+            // Use 127.0.0.1 instead of localhost: the JDK's HttpCookie.domainMatches() rejects
+            // domains without a dot (like "localhost"), so the CookieManager would never return
+            // stored cookies for subsequent requests to that host.
+            client.newCall(
+                Request.Builder().url("http://127.0.0.1:${wireMock.port()}/api/login").build()
+            ).execute().close()
+
+            client.newCall(
+                Request.Builder().url("http://127.0.0.1:${wireMock.port()}/api/protected").build()
+            ).execute().use {
+                assertEquals(200, it.code)
+                assertEquals("secret", it.body.string())
+            }
+
+            wireMock.verify(
+                getRequestedFor(urlEqualTo("/api/protected"))
+                    .withHeader("Cookie", containing("session=abc123"))
+            )
+        } finally {
+            client.dispatcher.executorService.shutdownNow()
+            client.connectionPool.evictAll()
+            httpClient.close()
+        }
     }
 
     @Test
