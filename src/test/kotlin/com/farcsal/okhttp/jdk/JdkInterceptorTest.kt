@@ -35,8 +35,8 @@ class JdkInterceptorTest {
         .build()
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .addInterceptor(OkHttpCacheInterceptor(Cache(cacheDir, 10 * 1024 * 1024)))
         .addInterceptor(CompressionInterceptor(Gzip))
+        .addInterceptor(OkHttpCacheInterceptor(Cache(cacheDir, 10 * 1024 * 1024)))
         .setup(httpClient)
         .build()
 
