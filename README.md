@@ -28,6 +28,7 @@ private val okHttpClient = OkHttpClient.Builder()
 - **Request bodies are fully buffered in heap memory before sending.** Not suitable for large streaming uploads.
 - **WebSocket upgrades are passed through to OkHttp's native stack.** The JDK `HttpClient` is not used for WebSocket connections.
 - **TLS/SSL configuration is not transferred** by `setup(httpClient)`. Configure it separately on each client if needed.
+- **HTTP/2 throughput may be lower than expected.** The JDK `HttpClient` maintains a process-level connection pool and honors the server's `SETTINGS_MAX_CONCURRENT_STREAMS` limit. Exceeding the limit raises an `IOException` not only on the offending request but potentially on other in-flight requests sharing the same connection. Use the `retryOnFailure` parameter of `setup(httpClient, retryOnFailure = RetryOnFailure(...))` to handle these transient failures transparently.
 
 ## Requirements
 

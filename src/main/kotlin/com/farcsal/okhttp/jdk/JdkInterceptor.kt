@@ -43,6 +43,12 @@ import javax.net.ssl.SSLSession
  * - OkHttp's network interceptors and its internal caching are bypassed.
  * - Cancellation is propagated via polling (every 500 ms) unless [useEventListener] is used.
  * - Request bodies are fully buffered into the heap before sending; not suitable for large uploads.
+ * - HTTP/2 throughput may be lower than expected: the JDK [HttpClient] maintains a process-level
+ *   connection pool and honors the server's `SETTINGS_MAX_CONCURRENT_STREAMS` limit. Exceeding
+ *   the limit causes an [IOException] not only on the offending request but potentially on other
+ *   in-flight requests sharing the same connection. Using a retry mechanism
+ *   (via [JdkRetryInterceptor]) is strongly recommended to
+ *   handle these transient failures transparently.
  */
 class JdkInterceptor private constructor(
     private val httpClient: HttpClient,
