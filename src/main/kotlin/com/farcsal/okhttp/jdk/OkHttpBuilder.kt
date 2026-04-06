@@ -1,5 +1,8 @@
 package com.farcsal.okhttp.jdk
 
+import okhttp3.Cache
+import okhttp3.CompressionInterceptor
+import okhttp3.CompressionInterceptor.DecompressionAlgorithm
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import java.net.http.HttpClient
@@ -18,15 +21,34 @@ import java.net.http.HttpClient
  *   (connect timeout, redirect policy, HTTP version, proxy) onto this builder before adding the
  *   interceptor.
  */
-fun OkHttpClient.Builder.setup(httpClient: HttpClient, loadConfiguration: Boolean = true): OkHttpClient.Builder {
+fun OkHttpClient.Builder.setup(
+    httpClient: HttpClient,
+    loadConfiguration: Boolean = true,
+    retryOnFailure: RetryOnFailure? = null,
+    decompressionAlgorithm: DecompressionAlgorithm? = null,
+    cache: Cache? = null,
+): OkHttpClient.Builder {
     if (loadConfiguration) {
-        loadConfiguration(httpClient)
+        loadConfiguration(httpClient, retryOnFailure != null, cache)
     }
-    val interceptor = JdkInterceptor.of(httpClient)
-    addInterceptor(interceptor)
-    eventListener(interceptor.useEventListener())
+    if (decompressionAlgorithm != null) {
+        addInterceptor(CompressionInterceptor(decompressionAlgorithm))
+    }
+    if (cache != null) {
+        addInterceptor(OkHttpCacheInterceptor(cache))
+    }
+    if (retryOnFailure != null) {
+        addInterceptor(JdkRetryInterceptor(httpClient, retryOnFailure.maxConnectionRetries))
+    }
+    val jdkInterceptor = JdkInterceptor.of(httpClient)
+    addInterceptor(jdkInterceptor)
+    eventListener(jdkInterceptor.useEventListener())
     return this
 }
+
+data class RetryOnFailure(
+    val maxConnectionRetries: Int,
+)
 
 /**
  * Mirrors a subset of this [HttpClient]'s settings onto the builder so that both clients stay
@@ -42,8 +64,19 @@ fun OkHttpClient.Builder.setup(httpClient: HttpClient, loadConfiguration: Boolea
  *
  * **Not propagated:** TLS/SSL configuration and other advanced settings.
  */
-fun OkHttpClient.Builder.loadConfiguration(httpClient: HttpClient): OkHttpClient.Builder {
+fun OkHttpClient.Builder.loadConfiguration(
+    httpClient: HttpClient,
+    retryOnFailure: Boolean = false,
+    cache: Cache? = null,
+): OkHttpClient.Builder {
     val b = this
+
+    b.retryOnConnectionFailure(retryOnFailure)
+
+    if (cache != null) {
+        b.cache(cache)
+    }
+
     httpClient.connectTimeout().ifPresent {
         b.connectTimeout(it)
     }

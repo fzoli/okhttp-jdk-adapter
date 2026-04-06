@@ -20,6 +20,7 @@ import java.nio.file.Files
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.zip.GZIPOutputStream
@@ -35,9 +36,11 @@ class JdkInterceptorTest {
         .build()
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .addInterceptor(CompressionInterceptor(Gzip))
-        .addInterceptor(OkHttpCacheInterceptor(Cache(cacheDir, 10 * 1024 * 1024)))
-        .setup(httpClient)
+        .setup(
+            httpClient,
+            retryOnFailure = RetryOnFailure(maxConnectionRetries = 3),
+            decompressionAlgorithm = Gzip,
+            cache = Cache(cacheDir, 10 * 1024 * 1024))
         .build()
 
     private val wireMock: WireMockServer = WireMockServer(wireMockConfig().dynamicPort())
@@ -63,6 +66,53 @@ class JdkInterceptorTest {
         wireMock.resetAll()
     }
 
+    @Test
+    fun `concurrent requests above SETTINGS_MAX_CONCURRENT_STREAMS all succeed`() {
+        wireMock.stubFor(
+            get(urlEqualTo("/api/concurrent-heavy"))
+                .willReturn(aResponse().withStatus(200).withBody("ok"))
+        )
+        val n = 2000
+        val latch = CountDownLatch(n)
+        val errors = mutableListOf<Throwable>()
+        val executor = Executors.newVirtualThreadPerTaskExecutor()
+        val semaphore = Semaphore(200) // exceeds HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS (128)
+        repeat(n) {
+            executor.submit {
+                try {
+                    val request = Request.Builder()
+                        .url("http://localhost:${wireMock.port()}/api/concurrent-heavy")
+                        .build()
+                    val call = okHttpClient.newCall(request)
+                    semaphore.acquire()
+                    try {
+                        call.execute().use { response ->
+                            assertEquals(200, response.code)
+                        }
+                    } finally {
+                        semaphore.release()
+                    }
+                } catch (e: Throwable) {
+                    // Without retry logic, the following exceptions are thrown:
+                    // If permits > 128:
+                    // - "java.io.IOException: too many concurrent streams"
+                    // Else:
+                    // - "java.io.IOException: Received RST_STREAM: Stream cancelled"
+                    // - "java.io.IOException: EOF reached while reading"
+                    // - "java.io.IOException: ..." Broken pipe (localized)
+                    synchronized(errors) {
+                        errors.add(e)
+                    }
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+        assertTrue(latch.await(30, TimeUnit.SECONDS))
+        executor.shutdown()
+        assertTrue(errors.isEmpty(), "Errors during concurrent requests: $errors")
+    }
+    
     @Test
     fun `GET returns JSON response`() {
         wireMock.stubFor(
