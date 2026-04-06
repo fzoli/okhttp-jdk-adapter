@@ -7,11 +7,14 @@ import okio.buffer
 import okio.source
 import java.io.IOException
 import java.io.InputStream
+import java.io.InterruptedIOException
 import java.net.*
 import java.net.http.*
+import javax.net.ssl.SSLException
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit.MILLISECONDS
 
 /**
@@ -49,6 +52,10 @@ class JdkInterceptor private constructor(
 
     private val activeCalls = ConcurrentHashMap<Call, Pair<Thread, Response?>>()
     private val scheduler = ScheduledThreadPoolExecutor(1)
+
+    // Per-connection completion semaphores: signalled whenever a request on that connection
+    // finishes, so that a request blocked on "too many concurrent streams" can retry.
+    private val connectionCompletions = ConcurrentHashMap<String, Semaphore>()
 
     private fun Pair<Thread, Response?>.interrupt() {
         this.second?.closeQuietly()
@@ -115,48 +122,126 @@ class JdkInterceptor private constructor(
 
         val thread = Thread.currentThread()
         val jdkRequest = originalRequest.toJdkRequest(chain.readTimeoutMillis())
+        val connKey = connectionKey(originalRequest)
         activeCalls[call] = Pair(thread, null)
-        val jdkResponse = try {
-            httpClient.send(jdkRequest, HttpResponse.BodyHandlers.ofInputStream())
-        } catch (e: InterruptedException) {
-            activeCalls.remove(call)
-            Thread.currentThread().interrupt()
-            if (call.isCanceled()) {
-                throw IOException("Canceled", e)
+
+        var connectionRetriesLeft = MAX_CONNECTION_RETRIES
+        while (true) {
+            val jdkResponse = try {
+                httpClient.send(jdkRequest, HttpResponse.BodyHandlers.ofInputStream())
+            } catch (e: InterruptedException) {
+                activeCalls.remove(call)
+                signalCompletion(connKey)
+                Thread.currentThread().interrupt()
+                if (call.isCanceled()) {
+                    throw IOException("Canceled", e)
+                }
+                throw e
+            } catch (e: HttpConnectTimeoutException) {
+                activeCalls.remove(call)
+                signalCompletion(connKey)
+                throw SocketTimeoutException("Connect timed out")
+                    .also { it.initCause(e) }
+            } catch (e: HttpTimeoutException) {
+                activeCalls.remove(call)
+                signalCompletion(connKey)
+                throw SocketTimeoutException("timeout")
+                    .also { it.initCause(e) }
+            } catch (e: ConnectException) {
+                activeCalls.remove(call)
+                signalCompletion(connKey)
+                val host = originalRequest.url.host
+                val port = originalRequest.url.port
+                val ip = "/" + InetAddress.getByName(host).hostAddress
+                throw ConnectException("Failed to connect to $host$ip:$port")
+                    .also { it.initCause(e) }
+            } catch (e: IOException) {
+                if (e.message == TOO_MANY_STREAMS_MESSAGE) {
+                    // HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS exceeded on this connection.
+                    // Wait until at least one in-flight request on the same connection completes,
+                    // then retry. We keep the activeCalls entry alive during the wait so that
+                    // cancellation is still tracked.
+                    val semaphore = connectionCompletions.getOrPut(connKey) { Semaphore(0) }
+                    try {
+                        semaphore.tryAcquire(TOO_MANY_STREAMS_WAIT_MILLIS, MILLISECONDS)
+                    } catch (ie: InterruptedException) {
+                        activeCalls.remove(call)
+                        signalCompletion(connKey)
+                        Thread.currentThread().interrupt()
+                        if (call.isCanceled()) throw IOException("Canceled", ie)
+                        throw ie
+                    }
+                    if (call.isCanceled()) {
+                        activeCalls.remove(call)
+                        signalCompletion(connKey)
+                        throw IOException("Canceled")
+                    }
+                    continue
+                }
+                if (isRetryable(e) && connectionRetriesLeft-- > 0) {
+                    // Treat as a transient connection failure (RST_STREAM, EOF, broken pipe,
+                    // connection reset during recycling, etc.).
+                    // Signal waiters so a blocked "too many concurrent streams" request can
+                    // proceed, then retry — the JDK will open a new connection if needed.
+                    signalCompletion(connKey)
+                    continue
+                }
+                activeCalls.remove(call)
+                signalCompletion(connKey)
+                if (e.message?.equals("Connection reset") == true) {
+                    throw SocketException(e.message, e)
+                }
+                throw e
+            } catch (t: Throwable) {
+                activeCalls.remove(call)
+                signalCompletion(connKey)
+                throw t
             }
-            throw e
-        } catch (e: HttpConnectTimeoutException) {
-            activeCalls.remove(call)
-            throw SocketTimeoutException("Connect timed out")
-                .also { it.initCause(e) }
-        } catch (e: HttpTimeoutException) {
-            activeCalls.remove(call)
-            throw SocketTimeoutException("timeout")
-                .also { it.initCause(e) }
-        } catch (e: ConnectException) {
-            activeCalls.remove(call)
-            val host = originalRequest.url.host
-            val port = originalRequest.url.port
-            val ip = "/" + InetAddress.getByName(host).hostAddress
-            throw ConnectException("Failed to connect to $host$ip:$port")
-                .also { it.initCause(e) }
-        } catch (e: IOException) {
-            activeCalls.remove(call)
-            if (e.message?.equals("Connection reset") == true) {
-                throw SocketException(e.message, e)
+
+            return try {
+                val response = buildResponse(call, jdkResponse, originalRequest, connKey)
+                activeCalls[call] = Pair(thread, response)
+                response
+            } catch (t: Throwable) {
+                activeCalls.remove(call)
+                signalCompletion(connKey)
+                throw t
             }
-            throw e
-        } catch (t: Throwable) {
-            activeCalls.remove(call)
-            throw t
         }
-        try {
-            val response = buildResponse(call, jdkResponse, originalRequest)
-            activeCalls[call] = Pair(thread, response)
-            return response
-        } catch (t: Throwable) {
-            activeCalls.remove(call)
-            throw t
+    }
+
+    // Mirrors OkHttp's RetryAndFollowUpInterceptor.isRecoverable() logic.
+    private fun isRetryable(e: IOException): Boolean {
+        if (e is UnknownHostException) return false   // DNS failure — no point retrying
+        if (e is ProtocolException) return false      // protocol violation
+        if (e is InterruptedIOException) return false // intentional interruption
+        if (e is SSLException) return false           // SSL/TLS failure (cert, pinning, etc.)
+        return true
+    }
+
+    private fun signalCompletion(connKey: String) {
+        connectionCompletions[connKey]?.release()
+    }
+
+    // Compute the connection pool key matching JDK's internal Http2ClientImpl pool key format:
+    //   C:H:host:port  — direct HTTP
+    //   S:H:host:port  — direct HTTPS
+    //   C:P:proxy:port — clear HTTP through proxy
+    //   S:T:H:host:port;P:proxy:port — HTTPS tunnel through proxy
+    private fun connectionKey(request: Request): String {
+        val secure = request.url.scheme == "https"
+        val host = request.url.host
+        val port = request.url.port
+        val proxy = httpClient.proxy().orElse(null)
+            ?.select(URI(request.url.toString()))
+            ?.firstOrNull()
+            ?.takeIf { it.type() != Proxy.Type.DIRECT }
+            ?.address() as? InetSocketAddress
+        return when {
+            proxy != null && !secure -> "C:P:${proxy.hostString}:${proxy.port}"
+            proxy != null && secure  -> "S:T:H:$host:$port;P:${proxy.hostString}:${proxy.port}"
+            secure                   -> "S:H:$host:$port"
+            else                     -> "C:H:$host:$port"
         }
     }
 
@@ -164,6 +249,7 @@ class JdkInterceptor private constructor(
         call: Call,
         httpResponse: HttpResponse<InputStream>,
         original: Request,
+        connKey: String,
     ): Response {
         val mediaType = httpResponse.headers().firstValue("Content-Type").orElse(null)?.toMediaTypeOrNull()
         val contentLength = httpResponse.headers().firstValue("Content-Length").orElse(null)?.toLongOrNull() ?: -1L
@@ -175,6 +261,7 @@ class JdkInterceptor private constructor(
             override fun source(): okio.BufferedSource = source
             override fun close() {
                 activeCalls.remove(call)
+                signalCompletion(connKey)
                 super.close()
             }
         }
@@ -204,6 +291,9 @@ class JdkInterceptor private constructor(
 
     companion object {
         private const val CANCELLATION_POLL_INTERVAL_MILLIS = 500L
+        private const val TOO_MANY_STREAMS_MESSAGE = "too many concurrent streams"
+        private const val TOO_MANY_STREAMS_WAIT_MILLIS = 5_000L
+        private const val MAX_CONNECTION_RETRIES = 5
 
         @JvmStatic
         fun of(httpClient: HttpClient): JdkInterceptor = JdkInterceptor(httpClient)
