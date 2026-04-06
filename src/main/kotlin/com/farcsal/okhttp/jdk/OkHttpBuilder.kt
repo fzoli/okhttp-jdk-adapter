@@ -20,6 +20,12 @@ import java.net.http.HttpClient
  * @param loadConfiguration If `true` (default), calls [loadConfiguration] to mirror the [HttpClient]'s settings
  *   (connect timeout, redirect policy, HTTP version, proxy) onto this builder before adding the
  *   interceptor.
+ * @param retryOnFailure If non-null, adds a [JdkRetryInterceptor] configured with the given
+ *   [RetryOnFailure] settings. Also enables OkHttp's own `retryOnConnectionFailure` flag if [loadConfiguration] is `true`.
+ * @param decompressionAlgorithm If non-null, adds a [CompressionInterceptor] that decompresses
+ *   response bodies using the specified algorithm.
+ * @param cache If non-null, adds [OkHttpCacheInterceptor] to serve and store cached responses.
+ *   If [loadConfiguration] is `true` configures OkHttp's HTTP cache.
  */
 fun OkHttpClient.Builder.setup(
     httpClient: HttpClient,

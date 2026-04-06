@@ -18,6 +18,38 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit.MILLISECONDS
 import javax.net.ssl.SSLException
 
+/**
+ * OkHttp interceptor that retries transient connection failures, taking into account the JDK
+ * [HttpClient]'s process-level connection caching.
+ *
+ * ## Motivation
+ *
+ * OkHttp's built-in `RetryAndFollowUpInterceptor` handles transient network errors, but the JDK
+ * HttpClient caches HTTP/2 connections at the process level. This means a retried request may land
+ * on the same already-broken connection, and requests may hit the `SETTINGS_MAX_CONCURRENT_STREAMS`
+ * limit when too many requests are in-flight on the same connection simultaneously.
+ *
+ * This interceptor handles two scenarios:
+ *
+ * ### 1. HTTP/2 `too many concurrent streams`
+ * When the server rejects a request because the concurrent stream limit is reached, the interceptor
+ * waits until another in-flight request on the same connection completes (up to
+ * [TOO_MANY_STREAMS_WAIT_MILLIS] ms), then retries automatically.
+ *
+ * ### 2. Transient connection failures
+ * When an [IOException] is considered retryable (e.g. `Connection reset`, `RST_STREAM`,
+ * `EOF reached while reading`, broken pipe), the interceptor retries up to [maxConnectionRetries]
+ * times. It does not retry on DNS failures, protocol violations, interruptions, or SSL/TLS errors —
+ * mirroring OkHttp's `isRecoverable()` logic.
+ *
+ * The [RetryResponseBody] wrapper ensures the connection semaphore is released when the response
+ * body is closed, allowing waiting requests to proceed.
+ *
+ * @param httpClient The JDK [HttpClient] instance whose proxy configuration is used to determine
+ *   the connection pool key.
+ * @param maxConnectionRetries Maximum number of retries allowed for transient connection failures
+ *   (>= 0). The `too many concurrent streams` case has no retry limit.
+ */
 class JdkRetryInterceptor(
     private val httpClient: HttpClient,
     private val maxConnectionRetries: Int,
