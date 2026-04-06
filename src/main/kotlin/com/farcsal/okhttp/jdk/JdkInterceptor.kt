@@ -117,6 +117,7 @@ class JdkInterceptor private constructor(
         val thread = Thread.currentThread()
         val jdkRequest = originalRequest.toJdkRequest(chain.readTimeoutMillis())
         activeCalls[call] = Pair(thread, null)
+        val sentRequestAtMillis = System.currentTimeMillis()
         val jdkResponse = try {
             httpClient.send(jdkRequest, HttpResponse.BodyHandlers.ofInputStream())
         } catch (e: InterruptedException) {
@@ -151,8 +152,9 @@ class JdkInterceptor private constructor(
             activeCalls.remove(call)
             throw t
         }
+        val receivedResponseAtMillis = System.currentTimeMillis()
         try {
-            val response = buildResponse(call, jdkResponse, originalRequest)
+            val response = buildResponse(call, jdkResponse, originalRequest, sentRequestAtMillis, receivedResponseAtMillis)
             activeCalls[call] = Pair(thread, response)
             return response
         } catch (t: Throwable) {
@@ -165,6 +167,8 @@ class JdkInterceptor private constructor(
         call: Call,
         httpResponse: HttpResponse<InputStream>,
         original: Request,
+        sentRequestAtMillis: Long,
+        receivedResponseAtMillis: Long,
     ): Response {
         val mediaType = httpResponse.headers().firstValue("Content-Type").orElse(null)?.toMediaTypeOrNull()
         val contentLength = httpResponse.headers().firstValue("Content-Length").orElse(null)?.toLongOrNull() ?: -1L
@@ -201,6 +205,8 @@ class JdkInterceptor private constructor(
             .headers(okHeaders)
             .body(responseBody)
             .handshake(handshake)
+            .sentRequestAtMillis(sentRequestAtMillis)
+            .receivedResponseAtMillis(receivedResponseAtMillis)
             .build()
     }
 
