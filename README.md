@@ -24,7 +24,7 @@ private val okHttpClient = OkHttpClient.Builder()
 
 ## Caveats
 
-- **OkHttp's network interceptors and internal cache are bypassed.** Only application interceptors run.
+- **OkHttp's network interceptors are bypassed.** Only application interceptors run. The internal cache can be enabled by adding `OkHttpCacheInterceptor` as an application interceptor before calling `setup(httpClient)`.
 - **Request bodies are fully buffered in heap memory before sending.** Not suitable for large streaming uploads.
 - **WebSocket upgrades are passed through to OkHttp's native stack.** The JDK `HttpClient` is not used for WebSocket connections.
 - **TLS/SSL configuration is not transferred** by `setup(httpClient)`. Configure it separately on each client if needed.
