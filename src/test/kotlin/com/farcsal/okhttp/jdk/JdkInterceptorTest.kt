@@ -1223,6 +1223,9 @@ class JdkInterceptorTest {
                     // with semaphore:
                     // - "java.io.IOException: Received RST_STREAM: Stream cancelled"
                     // - "java.io.IOException: EOF reached while reading"
+                    // HTTP/3
+                    // - okhttp3.Cache$Entry.writeTo(Cache.kt:633) ; handshake is null
+                    // - "java.lang.AssertionError: Concurrent modification" at java.net.http/jdk.internal.net.http.quic.OrderedFlow.poll(OrderedFlow.java:382)
                     synchronized(errors) {
                         errors.add(e)
                     }
