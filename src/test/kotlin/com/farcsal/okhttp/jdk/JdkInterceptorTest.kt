@@ -12,6 +12,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.internal.closeQuietly
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.*
 import java.net.http.HttpClient
@@ -21,6 +22,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.GZIPOutputStream
 import javax.net.ssl.SSLException
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -34,6 +36,7 @@ class JdkInterceptorTest {
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .addInterceptor(OkHttpCacheInterceptor(Cache(cacheDir, 10 * 1024 * 1024)))
+        .addInterceptor(CompressionInterceptor(Gzip))
         .setup(httpClient)
         .build()
 
@@ -932,6 +935,34 @@ class JdkInterceptorTest {
 
         assertTrue(latch.await(5, TimeUnit.SECONDS))
         assertNotNull(failureRef.get())
+    }
+
+    @Test
+    fun `gzip compressed response is transparently decompressed`() {
+        val originalBody = """{"message":"hello"}"""
+        val gzipped = ByteArrayOutputStream().also { bos ->
+            GZIPOutputStream(bos).use { it.write(originalBody.toByteArray()) }
+        }.toByteArray()
+
+        wireMock.stubFor(
+            get(urlEqualTo("/api/gzip"))
+                .willReturn(
+                    aResponse()
+                        .withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withHeader("Content-Encoding", "gzip")
+                        .withBody(gzipped)
+                )
+        )
+
+        val request = Request.Builder()
+            .url("http://localhost:${wireMock.port()}/api/gzip")
+            .build()
+
+        okHttpClient.newCall(request).execute().use {
+            assertEquals(200, it.code)
+            assertEquals(originalBody, it.body.string())
+        }
     }
 
     @Test
