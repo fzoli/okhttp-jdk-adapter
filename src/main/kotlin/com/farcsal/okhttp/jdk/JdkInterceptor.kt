@@ -13,6 +13,7 @@ import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit.MILLISECONDS
+import javax.net.ssl.SSLSession
 
 /**
  * OkHttp [Interceptor] that routes HTTP traffic through the JDK's built-in [HttpClient]
@@ -168,7 +169,7 @@ class JdkInterceptor private constructor(
         val mediaType = httpResponse.headers().firstValue("Content-Type").orElse(null)?.toMediaTypeOrNull()
         val contentLength = httpResponse.headers().firstValue("Content-Length").orElse(null)?.toLongOrNull() ?: -1L
         val source = httpResponse.body().source().buffer()
-
+        val handshake = httpResponse.sslSession().orElse(null)?.toOkHttpHandshake()
         val responseBody = object : ResponseBody() {
             override fun contentType(): MediaType? = mediaType
             override fun contentLength(): Long = contentLength
@@ -199,6 +200,7 @@ class JdkInterceptor private constructor(
             .message("")
             .headers(okHeaders)
             .body(responseBody)
+            .handshake(handshake)
             .build()
     }
 
@@ -209,6 +211,14 @@ class JdkInterceptor private constructor(
         fun of(httpClient: HttpClient): JdkInterceptor = JdkInterceptor(httpClient)
     }
 
+}
+
+private fun SSLSession.toOkHttpHandshake(): Handshake {
+    val cipher = CipherSuite.forJavaName(cipherSuite)
+    val peers = peerCertificates?.toList() ?: emptyList()
+    val locals = localCertificates?.toList() ?: emptyList()
+    val tls = TlsVersion.forJavaName(protocol)
+    return Handshake.get(tls, cipher, peers, locals)
 }
 
 private fun Request.toJdkRequest(readTimeoutMillis: Int): HttpRequest {
