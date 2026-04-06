@@ -10,12 +10,13 @@ import java.io.InputStream
 import java.io.InterruptedIOException
 import java.net.*
 import java.net.http.*
-import javax.net.ssl.SSLException
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit.MILLISECONDS
+import javax.net.ssl.SSLException
+import javax.net.ssl.SSLSession
 
 /**
  * OkHttp [Interceptor] that routes HTTP traffic through the JDK's built-in [HttpClient]
@@ -279,6 +280,8 @@ class JdkInterceptor private constructor(
             }
         }.build()
 
+        val handshake = httpResponse.sslSession().orElse(null)?.toOkHttpHandshake()
+
         return Response.Builder()
             .request(original)
             .protocol(protocol)
@@ -286,6 +289,7 @@ class JdkInterceptor private constructor(
             .message("")
             .headers(okHeaders)
             .body(responseBody)
+            .handshake(handshake)
             .build()
     }
 
@@ -299,6 +303,14 @@ class JdkInterceptor private constructor(
         fun of(httpClient: HttpClient): JdkInterceptor = JdkInterceptor(httpClient)
     }
 
+}
+
+private fun SSLSession.toOkHttpHandshake(): Handshake {
+    val cipher = CipherSuite.forJavaName(cipherSuite)
+    val peers = peerCertificates?.toList() ?: emptyList()
+    val locals = localCertificates?.toList() ?: emptyList()
+    val tls = TlsVersion.forJavaName(protocol)
+    return Handshake.get(tls, cipher, peers, locals)
 }
 
 private fun Request.toJdkRequest(readTimeoutMillis: Int): HttpRequest {
