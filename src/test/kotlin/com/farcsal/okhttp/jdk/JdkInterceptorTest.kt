@@ -93,7 +93,7 @@ class JdkInterceptorTest {
                         semaphore.release()
                     }
                 } catch (e: Throwable) {
-                    // Without retry logic, the following exceptions are thrown:
+                    // Without retry logic, the following exceptions are thrown using HTTP/2:
                     // If permits > 128:
                     // - "java.io.IOException: too many concurrent streams"
                     // Else:
