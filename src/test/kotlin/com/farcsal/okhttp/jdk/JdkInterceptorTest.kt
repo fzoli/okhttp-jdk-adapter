@@ -1178,12 +1178,16 @@ class JdkInterceptorTest {
         okHttpClient.newCall(request).execute().use {
             assertEquals(200, it.code)
             assertEquals(body, it.body.string())
+            assertNotNull(it.networkResponse)
+            assertNull(it.cacheResponse)
         }
 
         // The second call: cache sends If-None-Match, gets 304, serves cached body
         okHttpClient.newCall(request).execute().use {
             assertEquals(200, it.code)
             assertEquals(body, it.body.string())
+            assertNotNull(it.networkResponse)
+            assertNotNull(it.cacheResponse)
         }
 
         wireMock.verify(1, getRequestedFor(urlEqualTo("/api/etag")).withoutHeader("If-None-Match"))
