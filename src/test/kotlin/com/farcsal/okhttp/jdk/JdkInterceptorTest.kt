@@ -13,13 +13,9 @@ import okhttp3.internal.closeQuietly
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
 import java.io.IOException
-import java.net.ConnectException
-import java.net.CookieManager
-import java.net.ServerSocket
-import java.net.SocketException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
+import java.net.*
 import java.net.http.HttpClient
+import java.nio.file.Files
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -30,11 +26,14 @@ import javax.net.ssl.SSLException
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class JdkInterceptorTest {
 
+    private val cacheDir = Files.createTempDirectory("okhttp-jdk-test").toFile()
+
     private val httpClient = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_3)
         .build()
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor(OkHttpCacheInterceptor(Cache(cacheDir, 10 * 1024 * 1024)))
         .setup(httpClient)
         .build()
 
@@ -42,11 +41,13 @@ class JdkInterceptorTest {
 
     @BeforeAll
     fun setUp() {
+        cacheDir.mkdirs()
         wireMock.start()
     }
 
     @AfterAll
     fun tearDown() {
+        cacheDir.deleteRecursively()
         okHttpClient.dispatcher.executorService.shutdownNow()
         okHttpClient.connectionPool.evictAll()
         okHttpClient.cache?.close()
@@ -1103,6 +1104,59 @@ class JdkInterceptorTest {
             client.connectionPool.evictAll()
             httpClient.close()
         }
+    }
+
+    @Test
+    fun `ETag revalidation returns cached body on 304`() {
+        val etag = "\"v1\""
+        val body = """{"data":"hello"}"""
+
+        // First request: populate cache
+        wireMock.stubFor(
+            get(urlEqualTo("/api/etag"))
+                .inScenario("etag").whenScenarioStateIs("Started")
+                .willReturn(
+                    aResponse()
+                        .withStatus(200)
+                        .withHeader("Content-Type", "application/json")
+                        .withHeader("ETag", etag)
+                        .withHeader("Cache-Control", "no-cache")
+                        .withBody(body)
+                )
+                .willSetStateTo("Cached")
+        )
+
+        // Second request: revalidate - server says nothing changed
+        wireMock.stubFor(
+            get(urlEqualTo("/api/etag"))
+                .inScenario("etag").whenScenarioStateIs("Cached")
+                .withHeader("If-None-Match", equalTo(etag))
+                .willReturn(
+                    aResponse()
+                        .withStatus(304)
+                        .withHeader("ETag", etag)
+                        .withHeader("Cache-Control", "no-cache")
+                )
+        )
+
+        val request = Request.Builder()
+            .url("http://localhost:${wireMock.port()}/api/etag")
+            .build()
+
+        // First call: populates the cache
+        okHttpClient.newCall(request).execute().use {
+            assertEquals(200, it.code)
+            assertEquals(body, it.body.string())
+        }
+
+        // The second call: cache sends If-None-Match, gets 304, serves cached body
+        okHttpClient.newCall(request).execute().use {
+            assertEquals(200, it.code)
+            assertEquals(body, it.body.string())
+        }
+
+        wireMock.verify(1, getRequestedFor(urlEqualTo("/api/etag")).withoutHeader("If-None-Match"))
+        wireMock.verify(1, getRequestedFor(urlEqualTo("/api/etag")).withHeader("If-None-Match", equalTo(etag)))
     }
 
     @Test
