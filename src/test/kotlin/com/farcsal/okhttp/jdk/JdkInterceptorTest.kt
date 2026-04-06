@@ -132,6 +132,8 @@ class JdkInterceptorTest {
         okHttpClient.newCall(request).execute().use {
             assertEquals(200, it.code)
             assertEquals("""{"message":"hello"}""", it.body.string())
+            assertTrue(it.sentRequestAtMillis > 0)
+            assertTrue(it.receivedResponseAtMillis > it.sentRequestAtMillis)
         }
 
         val latch = CountDownLatch(1)
